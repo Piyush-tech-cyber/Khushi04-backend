@@ -16,7 +16,6 @@ def headers():
     return {
         "x-rapidapi-key":  RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST,
-        "Content-Type":    "application/json",
     }
 
 
@@ -49,6 +48,31 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/debug", methods=["POST"])
+def debug():
+    """Debug endpoint to see raw API response"""
+    body = request.get_json(silent=True) or {}
+    url  = (body.get("url") or "").strip()
+    shortcode = extract_shortcode(url)
+    
+    # Try multiple endpoint formats
+    endpoints = [
+        f"{BASE_URL}/media/{shortcode}",
+        f"{BASE_URL}/media/by/shortcode?shortcode={shortcode}",
+        f"https://{RAPIDAPI_HOST}/v1/media?shortcode={shortcode}",
+    ]
+    
+    results = {}
+    for ep in endpoints:
+        try:
+            r = requests.get(ep, headers=headers(), timeout=10)
+            results[ep] = {"status": r.status_code, "body": r.text[:300]}
+        except Exception as e:
+            results[ep] = {"error": str(e)}
+    
+    return jsonify(results)
+
+
 # ── 1. Post / Reel / Video ─────────────────────
 @app.route("/download/post", methods=["POST"])
 def download_post():
@@ -60,15 +84,34 @@ def download_post():
 
     shortcode = extract_shortcode(url)
     if not shortcode:
-        return api_error("Invalid Instagram URL. Example: https://www.instagram.com/p/ABC123/")
+        return api_error("Invalid Instagram URL.")
 
+    # Try shortcode endpoint
     try:
-        # Step 1: Get media_id from shortcode
         resp = requests.get(
-            f"{BASE_URL}/media/{shortcode}",
+            f"{BASE_URL}/media/by/shortcode",
+            params={"shortcode": shortcode},
             headers=headers(),
             timeout=25,
         )
+        
+        # If 404, try alternate endpoint
+        if resp.status_code == 404:
+            resp = requests.get(
+                f"{BASE_URL}/media/{shortcode}/info",
+                headers=headers(),
+                timeout=25,
+            )
+        
+        # If still 404, try posts endpoint
+        if resp.status_code == 404:
+            resp = requests.get(
+                f"https://{RAPIDAPI_HOST}/v1/media",
+                params={"shortcode": shortcode},
+                headers=headers(),
+                timeout=25,
+            )
+
     except requests.exceptions.Timeout:
         return api_error("Request timed out. Please try again.", 504)
     except requests.exceptions.RequestException as e:
@@ -77,9 +120,11 @@ def download_post():
     if resp.status_code in (401, 403):
         return api_error("API key invalid or expired.", 401)
     if resp.status_code == 429:
-        return api_error("Monthly API limit reached. Please try again next month.", 429)
+        return api_error("Monthly API limit reached.", 429)
+    if resp.status_code == 404:
+        return api_error("Post not found. Check the link and try again.")
     if resp.status_code != 200:
-        return api_error(f"API error (HTTP {resp.status_code}). Try again later.", resp.status_code)
+        return api_error(f"API error (HTTP {resp.status_code}).", resp.status_code)
 
     try:
         data = resp.json()
@@ -87,7 +132,7 @@ def download_post():
         return api_error("Could not parse API response.", 502)
 
     media_items = []
-    inner = data.get("data") or data
+    inner = data.get("data") or data.get("media") or data
 
     # Carousel
     edges = (inner.get("edge_sidecar_to_children") or {}).get("edges", [])
@@ -99,32 +144,21 @@ def download_post():
             if u:
                 media_items.append({
                     "type": "video" if node.get("video_url") else "image",
-                    "url": u,
-                    "thumbnail": t,
+                    "url": u, "thumbnail": t,
                 })
     else:
         video_url   = inner.get("video_url")
         display_url = inner.get("display_url")
-        # Some responses have direct media_url
         media_url   = inner.get("media_url") or inner.get("url")
 
         if video_url:
-            media_items.append({
-                "type": "video",
-                "url": video_url,
-                "thumbnail": display_url or video_url,
-            })
+            media_items.append({"type":"video","url":video_url,"thumbnail":display_url or video_url})
         elif display_url:
-            media_items.append({
-                "type": "image",
-                "url": display_url,
-                "thumbnail": display_url,
-            })
+            media_items.append({"type":"image","url":display_url,"thumbnail":display_url})
         elif media_url:
             media_items.append({
-                "type": "video" if media_url.endswith(".mp4") else "image",
-                "url": media_url,
-                "thumbnail": inner.get("thumbnail") or media_url,
+                "type":"video" if media_url.endswith(".mp4") else "image",
+                "url":media_url,"thumbnail":inner.get("thumbnail") or media_url
             })
 
     media_items = [m for m in media_items if m.get("url")]
@@ -132,12 +166,7 @@ def download_post():
     if not media_items:
         return api_error("No media found. Post may be private or deleted.")
 
-    return jsonify({
-        "success": True,
-        "shortcode": shortcode,
-        "media": media_items,
-        "count": len(media_items),
-    })
+    return jsonify({"success":True,"shortcode":shortcode,"media":media_items,"count":len(media_items)})
 
 
 # ── 2. Profile Picture ─────────────────────────
@@ -160,6 +189,12 @@ def download_profile():
             headers=headers(),
             timeout=25,
         )
+        if resp.status_code == 404:
+            resp = requests.get(
+                f"{BASE_URL}/users/{username}",
+                headers=headers(),
+                timeout=25,
+            )
     except requests.exceptions.Timeout:
         return api_error("Request timed out.", 504)
     except requests.exceptions.RequestException as e:
@@ -169,7 +204,7 @@ def download_profile():
         return api_error("API key invalid or expired.", 401)
     if resp.status_code == 429:
         return api_error("Monthly API limit reached.", 429)
-    if resp.status_code == 404:
+    if resp.status_code in (404, 400):
         return api_error(f"User '@{username}' not found.")
     if resp.status_code != 200:
         return api_error(f"API error (HTTP {resp.status_code}).", 502)
@@ -188,16 +223,13 @@ def download_profile():
     )
 
     if not pic_url:
-        return api_error("Could not get profile picture. Account may be private.")
+        return api_error("Could not get profile picture.")
 
     return jsonify({
         "success": True,
         "username": username,
         "full_name": inner.get("full_name") or username,
-        "follower_count": (
-            inner.get("edge_followed_by", {}).get("count")
-            or inner.get("follower_count")
-        ),
+        "follower_count": inner.get("edge_followed_by", {}).get("count") or inner.get("follower_count"),
         "profile_pic_url": pic_url,
         "is_private": inner.get("is_private", False),
     })
