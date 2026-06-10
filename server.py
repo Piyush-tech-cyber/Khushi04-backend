@@ -7,13 +7,9 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# ─────────────────────────────────────────────
-#  RapidAPI Credentials
-#  instagram120.p.rapidapi.com
-# ─────────────────────────────────────────────
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "6b7dc4806emsh65c412b8ad1ed5ep18eb8djsn9d9a0d459d2b")
-RAPIDAPI_HOST = "instagram120.p.rapidapi.com"
-BASE_URL      = f"https://{RAPIDAPI_HOST}"
+RAPIDAPI_HOST = "instagram-api-media-downloader.p.rapidapi.com"
+BASE_URL      = f"https://{RAPIDAPI_HOST}/v1"
 
 
 def headers():
@@ -24,12 +20,12 @@ def headers():
     }
 
 
-def extract_shortcode(url: str):
+def extract_shortcode(url):
     m = re.search(r"instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
     return m.group(1) if m else None
 
 
-def extract_username(raw: str):
+def extract_username(raw):
     raw = raw.strip().lstrip("@").strip("/")
     if "instagram.com" in raw:
         m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)/?$", raw)
@@ -43,11 +39,9 @@ def api_error(msg, code=400):
     return jsonify({"success": False, "error": msg}), code
 
 
-# ── Health ────────────────────────────────────
-
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Khushiverse backend running ✅"})
+    return jsonify({"status": "KhushiSundari backend running ✅"})
 
 
 @app.route("/health", methods=["GET"])
@@ -55,8 +49,7 @@ def health():
     return jsonify({"status": "ok"})
 
 
-# ── 1. Post / Reel / Video ────────────────────
-
+# ── 1. Post / Reel / Video ─────────────────────
 @app.route("/download/post", methods=["POST"])
 def download_post():
     body = request.get_json(silent=True) or {}
@@ -70,10 +63,9 @@ def download_post():
         return api_error("Invalid Instagram URL. Example: https://www.instagram.com/p/ABC123/")
 
     try:
-        # instagram120 uses POST /posts with JSON body
-        resp = requests.post(
-            f"{BASE_URL}/posts",
-            json={"url": url},
+        # Step 1: Get media_id from shortcode
+        resp = requests.get(
+            f"{BASE_URL}/media/{shortcode}",
             headers=headers(),
             timeout=25,
         )
@@ -95,9 +87,6 @@ def download_post():
         return api_error("Could not parse API response.", 502)
 
     media_items = []
-
-    # instagram120 /posts response shape:
-    # { "data": { "video_url": "...", "display_url": "...", "edge_sidecar_to_children": { "edges": [...] } } }
     inner = data.get("data") or data
 
     # Carousel
@@ -114,9 +103,11 @@ def download_post():
                     "thumbnail": t,
                 })
     else:
-        # Single item
         video_url   = inner.get("video_url")
         display_url = inner.get("display_url")
+        # Some responses have direct media_url
+        media_url   = inner.get("media_url") or inner.get("url")
+
         if video_url:
             media_items.append({
                 "type": "video",
@@ -128,6 +119,12 @@ def download_post():
                 "type": "image",
                 "url": display_url,
                 "thumbnail": display_url,
+            })
+        elif media_url:
+            media_items.append({
+                "type": "video" if media_url.endswith(".mp4") else "image",
+                "url": media_url,
+                "thumbnail": inner.get("thumbnail") or media_url,
             })
 
     media_items = [m for m in media_items if m.get("url")]
@@ -143,8 +140,7 @@ def download_post():
     })
 
 
-# ── 2. Profile Picture ────────────────────────
-
+# ── 2. Profile Picture ─────────────────────────
 @app.route("/download/profile", methods=["POST"])
 def download_profile():
     body = request.get_json(silent=True) or {}
@@ -158,10 +154,9 @@ def download_profile():
         return api_error("Invalid username.")
 
     try:
-        # instagram120 uses POST /userInfo
-        resp = requests.post(
-            f"{BASE_URL}/userInfo",
-            json={"username": username},
+        resp = requests.get(
+            f"{BASE_URL}/users/by/username",
+            params={"username": username},
             headers=headers(),
             timeout=25,
         )
@@ -207,8 +202,6 @@ def download_profile():
         "is_private": inner.get("is_private", False),
     })
 
-
-# ── Run ──────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
