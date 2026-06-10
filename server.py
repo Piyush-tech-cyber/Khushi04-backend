@@ -8,24 +8,19 @@ app = Flask(__name__)
 CORS(app)
 
 # ─────────────────────────────────────────────
-#  Apyflux Credentials
-#  Set these as Environment Variables on Render:
-#  APYFLUX_CLIENT_ID  → your Client ID
-#  APYFLUX_API_KEY    → your API Key
+#  RapidAPI Credentials
+#  instagram120.p.rapidapi.com
 # ─────────────────────────────────────────────
-APYFLUX_CLIENT_ID = os.environ.get("APYFLUX_CLIENT_ID", "")
-APYFLUX_API_KEY   = os.environ.get("APYFLUX_API_KEY", "")
+RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "6b7dc4806emsh65c412b8ad1ed5ep18eb8djsn9d9a0d459d2b")
+RAPIDAPI_HOST = "instagram120.p.rapidapi.com"
+BASE_URL      = f"https://{RAPIDAPI_HOST}"
 
-APYFLUX_BASE = "https://api.apyflux.com"
 
-
-# ── Helpers ──────────────────────────────────
-
-def apyflux_headers():
+def headers():
     return {
-        "x-apyflux-client-id": APYFLUX_CLIENT_ID,
-        "x-apyflux-api-key":   APYFLUX_API_KEY,
-        "Content-Type":        "application/json",
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "Content-Type":    "application/json",
     }
 
 
@@ -44,100 +39,26 @@ def extract_username(raw: str):
     return None
 
 
-def no_key_error():
-    return jsonify({
-        "success": False,
-        "error": "Apyflux credentials not configured. Please set APYFLUX_CLIENT_ID and APYFLUX_API_KEY on Render."
-    }), 500
-
-
-def api_error(msg: str, code: int = 400):
+def api_error(msg, code=400):
     return jsonify({"success": False, "error": msg}), code
 
 
-def parse_apyflux_media(data):
-    """
-    Apyflux /instagram/ endpoint returns JSON.
-    Handle all known response shapes and return
-    a normalised list of {type, url, thumbnail} dicts.
-    """
-    media_items = []
-
-    if not isinstance(data, dict):
-        return media_items
-
-    # Shape 1: { "data": { "video_url": "...", "display_url": "..." } }
-    inner = data.get("data") or data
-
-    # Shape 2: top-level or inner "items" / "media" list (carousel)
-    for key in ("items", "media", "carousel_media"):
-        if isinstance(inner.get(key), list):
-            for item in inner[key]:
-                u = (item.get("video_url") or item.get("url") or
-                     item.get("display_url") or "")
-                t = item.get("display_url") or item.get("thumbnail") or u
-                if u:
-                    media_items.append({
-                        "type": "video" if item.get("video_url") or u.endswith(".mp4") else "image",
-                        "url": u,
-                        "thumbnail": t,
-                    })
-            if media_items:
-                return media_items
-
-    # Shape 3: single item at top / inner level
-    video_url   = inner.get("video_url") or data.get("video_url")
-    display_url = inner.get("display_url") or data.get("display_url")
-    direct_url  = inner.get("url") or data.get("url")
-
-    if video_url:
-        media_items.append({
-            "type": "video",
-            "url": video_url,
-            "thumbnail": display_url or video_url,
-        })
-    elif display_url:
-        media_items.append({
-            "type": "image",
-            "url": display_url,
-            "thumbnail": display_url,
-        })
-    elif direct_url:
-        media_items.append({
-            "type": "video" if direct_url.endswith(".mp4") else "image",
-            "url": direct_url,
-            "thumbnail": inner.get("thumbnail") or data.get("thumbnail") or direct_url,
-        })
-
-    return [m for m in media_items if m.get("url")]
-
-
-# ── Routes ───────────────────────────────────
+# ── Health ────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Khushiverse backend is running ✅"})
+    return jsonify({"status": "Khushiverse backend running ✅"})
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "ok",
-        "apyflux_configured": bool(APYFLUX_CLIENT_ID and APYFLUX_API_KEY),
-    })
+    return jsonify({"status": "ok"})
 
 
-# ── 1. Download Reel / Photo / Video ─────────
+# ── 1. Post / Reel / Video ────────────────────
 
 @app.route("/download/post", methods=["POST"])
 def download_post():
-    """
-    Works for Reels, photos, carousels, video posts.
-    Body JSON: { "url": "https://www.instagram.com/p/..." }
-    """
-    if not (APYFLUX_CLIENT_ID and APYFLUX_API_KEY):
-        return no_key_error()
-
     body = request.get_json(silent=True) or {}
     url  = (body.get("url") or "").strip()
 
@@ -146,16 +67,14 @@ def download_post():
 
     shortcode = extract_shortcode(url)
     if not shortcode:
-        return api_error(
-            "Invalid Instagram URL. Example: https://www.instagram.com/p/ABC123/ "
-            "or https://www.instagram.com/reel/ABC123/"
-        )
+        return api_error("Invalid Instagram URL. Example: https://www.instagram.com/p/ABC123/")
 
     try:
-        resp = requests.get(
-            f"{APYFLUX_BASE}/instagram/",
-            params={"url": url},
-            headers=apyflux_headers(),
+        # instagram120 uses POST /posts with JSON body
+        resp = requests.post(
+            f"{BASE_URL}/posts",
+            json={"url": url},
+            headers=headers(),
             timeout=25,
         )
     except requests.exceptions.Timeout:
@@ -164,30 +83,57 @@ def download_post():
         return api_error(f"Network error: {str(e)}", 502)
 
     if resp.status_code in (401, 403):
-        return api_error(
-            "Apyflux credentials are invalid or expired. "
-            "Please check APYFLUX_CLIENT_ID and APYFLUX_API_KEY on Render.", 401
-        )
+        return api_error("API key invalid or expired.", 401)
     if resp.status_code == 429:
-        return api_error("API request limit reached. Please wait and try again.", 429)
+        return api_error("Monthly API limit reached. Please try again next month.", 429)
     if resp.status_code != 200:
-        return api_error(
-            f"Downloader API error (HTTP {resp.status_code}). Try again later.",
-            resp.status_code
-        )
+        return api_error(f"API error (HTTP {resp.status_code}). Try again later.", resp.status_code)
 
     try:
         data = resp.json()
     except Exception:
-        return api_error("Could not parse API response. Try again.", 502)
+        return api_error("Could not parse API response.", 502)
 
-    media_items = parse_apyflux_media(data)
+    media_items = []
+
+    # instagram120 /posts response shape:
+    # { "data": { "video_url": "...", "display_url": "...", "edge_sidecar_to_children": { "edges": [...] } } }
+    inner = data.get("data") or data
+
+    # Carousel
+    edges = (inner.get("edge_sidecar_to_children") or {}).get("edges", [])
+    if edges:
+        for edge in edges:
+            node = edge.get("node", {})
+            u = node.get("video_url") or node.get("display_url", "")
+            t = node.get("display_url") or u
+            if u:
+                media_items.append({
+                    "type": "video" if node.get("video_url") else "image",
+                    "url": u,
+                    "thumbnail": t,
+                })
+    else:
+        # Single item
+        video_url   = inner.get("video_url")
+        display_url = inner.get("display_url")
+        if video_url:
+            media_items.append({
+                "type": "video",
+                "url": video_url,
+                "thumbnail": display_url or video_url,
+            })
+        elif display_url:
+            media_items.append({
+                "type": "image",
+                "url": display_url,
+                "thumbnail": display_url,
+            })
+
+    media_items = [m for m in media_items if m.get("url")]
 
     if not media_items:
-        return api_error(
-            "No downloadable media found. "
-            "The post may be private, deleted, or age-restricted."
-        )
+        return api_error("No media found. Post may be private or deleted.")
 
     return jsonify({
         "success": True,
@@ -201,13 +147,6 @@ def download_post():
 
 @app.route("/download/profile", methods=["POST"])
 def download_profile():
-    """
-    Body JSON: { "username": "natgeo" }
-    Uses same Apyflux /instagram/ endpoint with profile URL.
-    """
-    if not (APYFLUX_CLIENT_ID and APYFLUX_API_KEY):
-        return no_key_error()
-
     body = request.get_json(silent=True) or {}
     raw  = (body.get("username") or "").strip()
 
@@ -216,71 +155,54 @@ def download_profile():
 
     username = extract_username(raw)
     if not username:
-        return api_error(
-            "Invalid username. Only letters, numbers, dots, and underscores allowed."
-        )
-
-    profile_url = f"https://www.instagram.com/{username}/"
+        return api_error("Invalid username.")
 
     try:
-        resp = requests.get(
-            f"{APYFLUX_BASE}/instagram/",
-            params={"url": profile_url},
-            headers=apyflux_headers(),
+        # instagram120 uses POST /userInfo
+        resp = requests.post(
+            f"{BASE_URL}/userInfo",
+            json={"username": username},
+            headers=headers(),
             timeout=25,
         )
     except requests.exceptions.Timeout:
-        return api_error("Request timed out. Please try again.", 504)
+        return api_error("Request timed out.", 504)
     except requests.exceptions.RequestException as e:
         return api_error(f"Network error: {str(e)}", 502)
 
     if resp.status_code in (401, 403):
-        return api_error("Apyflux credentials are invalid or expired.", 401)
+        return api_error("API key invalid or expired.", 401)
     if resp.status_code == 429:
-        return api_error("API request limit reached. Please wait and try again.", 429)
+        return api_error("Monthly API limit reached.", 429)
     if resp.status_code == 404:
-        return api_error(f"Instagram user '@{username}' not found.")
+        return api_error(f"User '@{username}' not found.")
     if resp.status_code != 200:
-        return api_error(
-            f"Profile API error (HTTP {resp.status_code}). Try again later.", 502
-        )
+        return api_error(f"API error (HTTP {resp.status_code}).", 502)
 
     try:
         data = resp.json()
     except Exception:
-        return api_error("Could not parse profile data.", 502)
+        return api_error("Could not parse response.", 502)
 
-    inner = data.get("data") or data
+    inner = data.get("data") or data.get("user") or data
 
     pic_url = (
         inner.get("profile_pic_url_hd")
         or inner.get("hd_profile_pic_url_info", {}).get("url")
         or inner.get("profile_pic_url")
-        or data.get("profile_pic_url_hd")
-        or data.get("profile_pic_url")
     )
 
     if not pic_url:
-        return api_error(
-            "Could not retrieve profile picture. "
-            "The account may be private or the username is incorrect."
-        )
-
-    full_name = (
-        inner.get("full_name") or data.get("full_name") or username
-    )
-    follower_count = (
-        inner.get("edge_followed_by", {}).get("count")
-        or inner.get("follower_count")
-        or inner.get("followers")
-        or data.get("follower_count")
-    )
+        return api_error("Could not get profile picture. Account may be private.")
 
     return jsonify({
         "success": True,
         "username": username,
-        "full_name": full_name,
-        "follower_count": follower_count,
+        "full_name": inner.get("full_name") or username,
+        "follower_count": (
+            inner.get("edge_followed_by", {}).get("count")
+            or inner.get("follower_count")
+        ),
         "profile_pic_url": pic_url,
         "is_private": inner.get("is_private", False),
     })
