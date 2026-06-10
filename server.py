@@ -8,14 +8,15 @@ app = Flask(__name__)
 CORS(app)
 
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "6b7dc4806emsh65c412b8ad1ed5ep18eb8djsn9d9a0d459d2b")
-RAPIDAPI_HOST = "instagram-api-media-downloader.p.rapidapi.com"
-BASE_URL      = f"https://{RAPIDAPI_HOST}/v1"
+RAPIDAPI_HOST = "instagram120.p.rapidapi.com"
+BASE_URL      = f"https://{RAPIDAPI_HOST}"
 
 
 def headers():
     return {
         "x-rapidapi-key":  RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST,
+        "Content-Type":    "application/json",
     }
 
 
@@ -48,31 +49,6 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.route("/debug", methods=["POST"])
-def debug():
-    """Debug endpoint to see raw API response"""
-    body = request.get_json(silent=True) or {}
-    url  = (body.get("url") or "").strip()
-    shortcode = extract_shortcode(url)
-    
-    # Try multiple endpoint formats
-    endpoints = [
-        f"{BASE_URL}/media/{shortcode}",
-        f"{BASE_URL}/media/by/shortcode?shortcode={shortcode}",
-        f"https://{RAPIDAPI_HOST}/v1/media?shortcode={shortcode}",
-    ]
-    
-    results = {}
-    for ep in endpoints:
-        try:
-            r = requests.get(ep, headers=headers(), timeout=10)
-            results[ep] = {"status": r.status_code, "body": r.text[:300]}
-        except Exception as e:
-            results[ep] = {"error": str(e)}
-    
-    return jsonify(results)
-
-
 # ── 1. Post / Reel / Video ─────────────────────
 @app.route("/download/post", methods=["POST"])
 def download_post():
@@ -86,32 +62,13 @@ def download_post():
     if not shortcode:
         return api_error("Invalid Instagram URL.")
 
-    # Try shortcode endpoint
     try:
-        resp = requests.get(
-            f"{BASE_URL}/media/by/shortcode",
-            params={"shortcode": shortcode},
+        resp = requests.post(
+            f"{BASE_URL}/mediaByShortcode",
+            json={"shortcode": shortcode},
             headers=headers(),
             timeout=25,
         )
-        
-        # If 404, try alternate endpoint
-        if resp.status_code == 404:
-            resp = requests.get(
-                f"{BASE_URL}/media/{shortcode}/info",
-                headers=headers(),
-                timeout=25,
-            )
-        
-        # If still 404, try posts endpoint
-        if resp.status_code == 404:
-            resp = requests.get(
-                f"https://{RAPIDAPI_HOST}/v1/media",
-                params={"shortcode": shortcode},
-                headers=headers(),
-                timeout=25,
-            )
-
     except requests.exceptions.Timeout:
         return api_error("Request timed out. Please try again.", 504)
     except requests.exceptions.RequestException as e:
@@ -121,8 +78,6 @@ def download_post():
         return api_error("API key invalid or expired.", 401)
     if resp.status_code == 429:
         return api_error("Monthly API limit reached.", 429)
-    if resp.status_code == 404:
-        return api_error("Post not found. Check the link and try again.")
     if resp.status_code != 200:
         return api_error(f"API error (HTTP {resp.status_code}).", resp.status_code)
 
@@ -149,17 +104,11 @@ def download_post():
     else:
         video_url   = inner.get("video_url")
         display_url = inner.get("display_url")
-        media_url   = inner.get("media_url") or inner.get("url")
 
         if video_url:
             media_items.append({"type":"video","url":video_url,"thumbnail":display_url or video_url})
         elif display_url:
             media_items.append({"type":"image","url":display_url,"thumbnail":display_url})
-        elif media_url:
-            media_items.append({
-                "type":"video" if media_url.endswith(".mp4") else "image",
-                "url":media_url,"thumbnail":inner.get("thumbnail") or media_url
-            })
 
     media_items = [m for m in media_items if m.get("url")]
 
@@ -183,18 +132,12 @@ def download_profile():
         return api_error("Invalid username.")
 
     try:
-        resp = requests.get(
-            f"{BASE_URL}/users/by/username",
-            params={"username": username},
+        resp = requests.post(
+            f"{BASE_URL}/userInfo",
+            json={"username": username},
             headers=headers(),
             timeout=25,
         )
-        if resp.status_code == 404:
-            resp = requests.get(
-                f"{BASE_URL}/users/{username}",
-                headers=headers(),
-                timeout=25,
-            )
     except requests.exceptions.Timeout:
         return api_error("Request timed out.", 504)
     except requests.exceptions.RequestException as e:
